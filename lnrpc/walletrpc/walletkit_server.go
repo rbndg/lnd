@@ -404,6 +404,9 @@ func (w *WalletKit) PendingSweeps(ctx context.Context,
 		broadcastAttempts := uint32(pendingInput.BroadcastAttempts)
 		nextBroadcastHeight := uint32(pendingInput.NextBroadcastHeight)
 
+		requestedFee := pendingInput.Params.Fee
+		requestedFeeRate := uint32(requestedFee.FeeRate.FeePerKVByte() / 1000)
+
 		rpcPendingSweeps = append(rpcPendingSweeps, &PendingSweep{
 			Outpoint:            op,
 			WitnessType:         witnessType,
@@ -411,6 +414,9 @@ func (w *WalletKit) PendingSweeps(ctx context.Context,
 			SatPerByte:          satPerByte,
 			BroadcastAttempts:   broadcastAttempts,
 			NextBroadcastHeight: nextBroadcastHeight,
+			RequestedSatPerByte: requestedFeeRate,
+			RequestedConfTarget: requestedFee.ConfTarget,
+			Force:               pendingInput.Params.Force,
 		})
 	}
 
@@ -480,7 +486,12 @@ func (w *WalletKit) BumpFee(ctx context.Context,
 	// bump its fee, which will result in a replacement transaction (RBF)
 	// being broadcast. If it is not aware of the input however,
 	// lnwallet.ErrNotMine is returned.
-	_, err = w.cfg.Sweeper.BumpFee(*op, feePreference)
+	params := sweep.Params{
+		Fee:   feePreference,
+		Force: in.Force,
+	}
+
+	_, err = w.cfg.Sweeper.UpdateParams(*op, params)
 	switch err {
 	case nil:
 		return &BumpFeeResponse{}, nil
@@ -536,7 +547,7 @@ func (w *WalletKit) BumpFee(ctx context.Context,
 	}
 
 	input := input.NewBaseInput(op, witnessType, signDesc, uint32(currentHeight))
-	if _, err = w.cfg.Sweeper.SweepInput(input, feePreference); err != nil {
+	if _, err = w.cfg.Sweeper.SweepInput(input, sweep.Params{Fee: feePreference}); err != nil {
 		return nil, err
 	}
 

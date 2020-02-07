@@ -24,10 +24,10 @@ import (
 	"github.com/lightningnetwork/lnd/lnwallet/chanvalidate"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/multimutex"
+	"github.com/lightningnetwork/lnd/record"
 	"github.com/lightningnetwork/lnd/routing/chainview"
 	"github.com/lightningnetwork/lnd/routing/route"
 	"github.com/lightningnetwork/lnd/ticker"
-	"github.com/lightningnetwork/lnd/tlv"
 	"github.com/lightningnetwork/lnd/zpay32"
 )
 
@@ -224,6 +224,10 @@ type ChannelPolicy struct {
 	// MaxHTLC is the maximum HTLC size including fees we are allowed to
 	// forward over this channel.
 	MaxHTLC lnwire.MilliSatoshi
+
+	// MinHTLC is the minimum HTLC size including fees we are allowed to
+	// forward over this channel.
+	MinHTLC *lnwire.MilliSatoshi
 }
 
 // Config defines the configuration for the ChannelRouter. ALL elements within
@@ -533,7 +537,7 @@ func (r *ChannelRouter) Start() error {
 				PaymentHash: payment.Info.PaymentHash,
 			}
 
-			_, _, err = r.sendPayment(payment.Attempt, lPayment, paySession)
+			_, _, err := r.sendPayment(payment.Attempt, lPayment, paySession)
 			if err != nil {
 				log.Errorf("Resuming payment with hash %v "+
 					"failed: %v.", payment.Info.PaymentHash, err)
@@ -1397,45 +1401,16 @@ type routingMsg struct {
 // factoring in channel capacities and cumulative fees along the route.
 func (r *ChannelRouter) FindRoute(source, target route.Vertex,
 	amt lnwire.MilliSatoshi, restrictions *RestrictParams,
-	destTlvRecords []tlv.Record,
-	finalExpiry ...uint16) (*route.Route, error) {
+	destCustomRecords record.CustomSet,
+	routeHints map[route.Vertex][]*channeldb.ChannelEdgePolicy,
+	finalExpiry uint16) (*route.Route, error) {
 
-	var finalCLTVDelta uint16
-	if len(finalExpiry) == 0 {
-		finalCLTVDelta = zpay32.DefaultFinalCLTVDelta
-	} else {
-		finalCLTVDelta = finalExpiry[0]
-	}
-
-	log.Debugf("Searching for path to %x, sending %v", target, amt)
-
-	// We can short circuit the routing by opportunistically checking to
-	// see if the target vertex event exists in the current graph.
-	if _, exists, err := r.cfg.Graph.HasLightningNode(target); err != nil {
-		return nil, err
-	} else if !exists {
-		log.Debugf("Target %x is not in known graph", target)
-		return nil, newErrf(ErrTargetNotInNetwork, "target not found")
-	}
+	log.Debugf("Searching for path to %v, sending %v", target, amt)
 
 	// We'll attempt to obtain a set of bandwidth hints that can help us
 	// eliminate certain routes early on in the path finding process.
 	bandwidthHints, err := generateBandwidthHints(
 		r.selfNode, r.cfg.QueryBandwidth,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	// Now that we know the destination is reachable within the graph, we'll
-	// execute our path finding algorithm.
-	path, err := findPath(
-		&graphParams{
-			graph:          r.cfg.Graph,
-			bandwidthHints: bandwidthHints,
-		},
-		restrictions, &r.cfg.PathFindingConfig,
-		source, target, amt,
 	)
 	if err != nil {
 		return nil, err
@@ -1448,10 +1423,31 @@ func (r *ChannelRouter) FindRoute(source, target route.Vertex,
 		return nil, err
 	}
 
+	// Now that we know the destination is reachable within the graph, we'll
+	// execute our path finding algorithm.
+	finalHtlcExpiry := currentHeight + int32(finalExpiry)
+
+	path, err := findPath(
+		&graphParams{
+			graph:           r.cfg.Graph,
+			bandwidthHints:  bandwidthHints,
+			additionalEdges: routeHints,
+		},
+		restrictions, &r.cfg.PathFindingConfig,
+		source, target, amt, finalHtlcExpiry,
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create the route with absolute time lock values.
 	route, err := newRoute(
-		amt, source, path, uint32(currentHeight), finalCLTVDelta,
-		destTlvRecords,
+		source, path, uint32(currentHeight),
+		finalHopParams{
+			amt:       amt,
+			cltvDelta: finalExpiry,
+			records:   destCustomRecords,
+		},
 	)
 	if err != nil {
 		return nil, err
@@ -1483,13 +1479,6 @@ func generateNewSessionKey() (*btcec.PrivateKey, error) {
 func generateSphinxPacket(rt *route.Route, paymentHash []byte,
 	sessionKey *btcec.PrivateKey) ([]byte, *sphinx.Circuit, error) {
 
-	// As a sanity check, we'll ensure that the set of hops has been
-	// properly filled in, otherwise, we won't actually be able to
-	// construct a route.
-	if len(rt.Hops) == 0 {
-		return nil, nil, route.ErrNoRouteHopsProvided
-	}
-
 	// Now that we know we have an actual route, we'll map the route into a
 	// sphinx payument path which includes per-hop paylods for each hop
 	// that give each node within the route the necessary information
@@ -1515,6 +1504,7 @@ func generateSphinxPacket(rt *route.Route, paymentHash []byte,
 	// privacy preserving source routing across the network.
 	sphinxPacket, err := sphinx.NewOnionPacket(
 		sphinxPath, sessionKey, paymentHash,
+		sphinx.DeterministicPacketFiller,
 	)
 	if err != nil {
 		return nil, nil, err
@@ -1596,15 +1586,32 @@ type LightningPayment struct {
 	// hop. If nil, any channel may be used.
 	OutgoingChannelID *uint64
 
+	// LastHop is the pubkey of the last node before the final destination
+	// is reached. If nil, any node may be used.
+	LastHop *route.Vertex
+
+	// DestFeatures specifies the set of features we assume the final node
+	// has for pathfinding. Typically these will be taken directly from an
+	// invoice, but they can also be manually supplied or assumed by the
+	// sender. If a nil feature vector is provided, the router will try to
+	// fallback to the graph in order to load a feature vector for a node in
+	// the public graph.
+	DestFeatures *lnwire.FeatureVector
+
+	// PaymentAddr is the payment address specified by the receiver. This
+	// field should be a random 32-byte nonce presented in the receiver's
+	// invoice to prevent probing of the destination.
+	PaymentAddr *[32]byte
+
 	// PaymentRequest is an optional payment request that this payment is
 	// attempting to complete.
 	PaymentRequest []byte
 
-	// FinalDestRecords are TLV records that are to be sent to the final
+	// DestCustomRecords are TLV records that are to be sent to the final
 	// hop in the new onion payload format. If the destination does not
 	// understand this new onion payload format, then the payment will
 	// fail.
-	FinalDestRecords []tlv.Record
+	DestCustomRecords record.CustomSet
 }
 
 // SendPayment attempts to send a payment as described within the passed
@@ -1850,7 +1857,7 @@ func (r *ChannelRouter) tryApplyChannelUpdate(rt *route.Route,
 
 	// Apply channel update.
 	if !r.applyChannelUpdate(update, errSource) {
-		log.Debugf("Invalid channel update received: node=%x",
+		log.Debugf("Invalid channel update received: node=%v",
 			errVertex)
 	}
 
@@ -1889,18 +1896,33 @@ func (r *ChannelRouter) processSendError(paymentID uint64, rt *route.Route,
 
 		return reportFail(nil, nil)
 	}
-	// If an internal, non-forwarding error occurred, we can stop
-	// trying.
-	fErr, ok := sendErr.(*htlcswitch.ForwardingError)
+
+	// If the error is a ClearTextError, we have received a valid wire
+	// failure message, either from our own outgoing link or from a node
+	// down the route. If the error is not related to the propagation of
+	// our payment, we can stop trying because an internal error has
+	// occurred.
+	rtErr, ok := sendErr.(htlcswitch.ClearTextError)
 	if !ok {
 		return &internalErrorReason
 	}
 
-	failureMessage := fErr.FailureMessage
-	failureSourceIdx := fErr.FailureSourceIdx
+	// failureSourceIdx is the index of the node that the failure occurred
+	// at. If the ClearTextError received is not a ForwardingError the
+	// payment error occurred at our node, so we leave this value as 0
+	// to indicate that the failure occurred locally. If the error is a
+	// ForwardingError, it did not originate at our node, so we set
+	// failureSourceIdx to the index of the node where the failure occurred.
+	failureSourceIdx := 0
+	source, ok := rtErr.(*htlcswitch.ForwardingError)
+	if ok {
+		failureSourceIdx = source.FailureSourceIdx
+	}
 
-	// Apply channel update if the error contains one. For unknown
-	// failures, failureMessage is nil.
+	// Extract the wire failure and apply channel update if it contains one.
+	// If we received an unknown failure message from a node along the
+	// route, the failure message will be nil.
+	failureMessage := rtErr.WireMessage()
 	if failureMessage != nil {
 		err := r.tryApplyChannelUpdate(
 			rt, failureSourceIdx, failureMessage,
@@ -2071,11 +2093,7 @@ func (r *ChannelRouter) GetChannelByID(chanID lnwire.ShortChannelID) (
 //
 // NOTE: This method is part of the ChannelGraphSource interface.
 func (r *ChannelRouter) FetchLightningNode(node route.Vertex) (*channeldb.LightningNode, error) {
-	pubKey, err := btcec.ParsePubKey(node[:], btcec.S256())
-	if err != nil {
-		return nil, fmt.Errorf("unable to parse raw public key: %v", err)
-	}
-	return r.cfg.Graph.FetchLightningNode(pubKey)
+	return r.cfg.Graph.FetchLightningNode(nil, node)
 }
 
 // ForEachNode is used to iterate over every node in router topology.
@@ -2402,7 +2420,11 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 	}
 
 	return newRoute(
-		receiverAmt, source, pathEdges, uint32(height),
-		uint16(finalCltvDelta), nil,
+		source, pathEdges, uint32(height),
+		finalHopParams{
+			amt:       receiverAmt,
+			cltvDelta: uint16(finalCltvDelta),
+			records:   nil,
+		},
 	)
 }

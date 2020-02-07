@@ -39,6 +39,7 @@ import (
 
 const (
 	testStartingHeight = 100
+	testDefaultDelta   = 6
 )
 
 // concurrentTester is a thread-safe wrapper around the Fatalf method of a
@@ -245,7 +246,7 @@ func TestChannelLinkSingleHopPayment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to get invoice: %v", err)
 	}
-	if invoice.Terms.State != channeldb.ContractSettled {
+	if invoice.State != channeldb.ContractSettled {
 		t.Fatal("alice invoice wasn't settled")
 	}
 
@@ -505,7 +506,7 @@ func testChannelLinkMultiHopPayment(t *testing.T,
 	if err != nil {
 		t.Fatalf("unable to get invoice: %v", err)
 	}
-	if invoice.Terms.State != channeldb.ContractSettled {
+	if invoice.State != channeldb.ContractSettled {
 		t.Fatal("carol invoice haven't been settled")
 	}
 
@@ -574,12 +575,12 @@ func TestExitNodeTimelockPayloadMismatch(t *testing.T) {
 		t.Fatalf("payment should have failed but didn't")
 	}
 
-	ferr, ok := err.(*ForwardingError)
+	rtErr, ok := err.(ClearTextError)
 	if !ok {
-		t.Fatalf("expected a ForwardingError, instead got: %T", err)
+		t.Fatalf("expected a ClearTextError, instead got: %T", err)
 	}
 
-	switch ferr.FailureMessage.(type) {
+	switch rtErr.WireMessage().(type) {
 	case *lnwire.FailFinalIncorrectCltvExpiry:
 	default:
 		t.Fatalf("incorrect error, expected incorrect cltv expiry, "+
@@ -674,12 +675,12 @@ func TestLinkForwardTimelockPolicyMismatch(t *testing.T) {
 		t.Fatalf("payment should have failed but didn't")
 	}
 
-	ferr, ok := err.(*ForwardingError)
+	rtErr, ok := err.(ClearTextError)
 	if !ok {
-		t.Fatalf("expected a ForwardingError, instead got: %T", err)
+		t.Fatalf("expected a ClearTextError, instead got: %T", err)
 	}
 
-	switch ferr.FailureMessage.(type) {
+	switch rtErr.WireMessage().(type) {
 	case *lnwire.FailIncorrectCltvExpiry:
 	default:
 		t.Fatalf("incorrect error, expected incorrect cltv expiry, "+
@@ -732,12 +733,12 @@ func TestLinkForwardFeePolicyMismatch(t *testing.T) {
 		t.Fatalf("payment should have failed but didn't")
 	}
 
-	ferr, ok := err.(*ForwardingError)
+	rtErr, ok := err.(ClearTextError)
 	if !ok {
-		t.Fatalf("expected a ForwardingError, instead got: %T", err)
+		t.Fatalf("expected a ClearTextError, instead got: %T", err)
 	}
 
-	switch ferr.FailureMessage.(type) {
+	switch rtErr.WireMessage().(type) {
 	case *lnwire.FailFeeInsufficient:
 	default:
 		t.Fatalf("incorrect error, expected fee insufficient, "+
@@ -790,12 +791,12 @@ func TestLinkForwardMinHTLCPolicyMismatch(t *testing.T) {
 		t.Fatalf("payment should have failed but didn't")
 	}
 
-	ferr, ok := err.(*ForwardingError)
+	rtErr, ok := err.(ClearTextError)
 	if !ok {
-		t.Fatalf("expected a ForwardingError, instead got: %T", err)
+		t.Fatalf("expected a ClearTextError, instead got: %T", err)
 	}
 
-	switch ferr.FailureMessage.(type) {
+	switch rtErr.WireMessage().(type) {
 	case *lnwire.FailAmountBelowMinimum:
 	default:
 		t.Fatalf("incorrect error, expected amount below minimum, "+
@@ -857,12 +858,12 @@ func TestLinkForwardMaxHTLCPolicyMismatch(t *testing.T) {
 		t.Fatalf("payment should have failed but didn't")
 	}
 
-	ferr, ok := err.(*ForwardingError)
+	rtErr, ok := err.(ClearTextError)
 	if !ok {
-		t.Fatalf("expected a ForwardingError, instead got: %T", err)
+		t.Fatalf("expected a ClearTextError, instead got: %T", err)
 	}
 
-	switch ferr.FailureMessage.(type) {
+	switch rtErr.WireMessage().(type) {
 	case *lnwire.FailTemporaryChannelFailure:
 	default:
 		t.Fatalf("incorrect error, expected temporary channel failure, "+
@@ -919,7 +920,7 @@ func TestUpdateForwardingPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to get invoice: %v", err)
 	}
-	if invoice.Terms.State != channeldb.ContractSettled {
+	if invoice.State != channeldb.ContractSettled {
 		t.Fatal("carol invoice haven't been settled")
 	}
 
@@ -964,11 +965,12 @@ func TestUpdateForwardingPolicy(t *testing.T) {
 		t.Fatalf("payment should've been rejected")
 	}
 
-	ferr, ok := err.(*ForwardingError)
+	rtErr, ok := err.(ClearTextError)
 	if !ok {
-		t.Fatalf("expected a ForwardingError, instead got (%T): %v", err, err)
+		t.Fatalf("expected a ClearTextError, instead got (%T): %v", err, err)
 	}
-	switch ferr.FailureMessage.(type) {
+
+	switch rtErr.WireMessage().(type) {
 	case *lnwire.FailFeeInsufficient:
 	default:
 		t.Fatalf("expected FailFeeInsufficient instead got: %v", err)
@@ -1003,12 +1005,13 @@ func TestUpdateForwardingPolicy(t *testing.T) {
 		t.Fatalf("payment should've been rejected")
 	}
 
-	ferr, ok = err.(*ForwardingError)
+	rtErr, ok = err.(ClearTextError)
 	if !ok {
-		t.Fatalf("expected a ForwardingError, instead got (%T): %v",
+		t.Fatalf("expected a ClearTextError, instead got (%T): %v",
 			err, err)
 	}
-	switch ferr.FailureMessage.(type) {
+
+	switch rtErr.WireMessage().(type) {
 	case *lnwire.FailTemporaryChannelFailure:
 	default:
 		t.Fatalf("expected TemporaryChannelFailure, instead got: %v",
@@ -1078,7 +1081,7 @@ func TestChannelLinkMultiHopInsufficientPayment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to get invoice: %v", err)
 	}
-	if invoice.Terms.State == channeldb.ContractSettled {
+	if invoice.State == channeldb.ContractSettled {
 		t.Fatal("carol invoice have been settled")
 	}
 
@@ -1248,8 +1251,15 @@ func TestChannelLinkMultiHopUnknownNextHop(t *testing.T) {
 		totalTimelock).Wait(30 * time.Second)
 	if err == nil {
 		t.Fatal("error haven't been received")
-	} else if err.Error() != lnwire.CodeUnknownNextPeer.String() {
-		t.Fatalf("wrong error have been received: %v", err)
+	}
+	rtErr, ok := err.(ClearTextError)
+	if !ok {
+		t.Fatalf("expected ClearTextError")
+	}
+
+	if _, ok = rtErr.WireMessage().(*lnwire.FailUnknownNextPeer); !ok {
+		t.Fatalf("wrong error has been received: %T",
+			rtErr.WireMessage())
 	}
 
 	// Wait for Alice to receive the revocation.
@@ -1263,7 +1273,7 @@ func TestChannelLinkMultiHopUnknownNextHop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to get invoice: %v", err)
 	}
-	if invoice.Terms.State == channeldb.ContractSettled {
+	if invoice.State == channeldb.ContractSettled {
 		t.Fatal("carol invoice have been settled")
 	}
 
@@ -1358,12 +1368,12 @@ func TestChannelLinkMultiHopDecodeError(t *testing.T) {
 		t.Fatal("error haven't been received")
 	}
 
-	ferr, ok := err.(*ForwardingError)
+	rtErr, ok := err.(ClearTextError)
 	if !ok {
-		t.Fatalf("expected a ForwardingError, instead got: %T", err)
+		t.Fatalf("expected a ClearTextError, instead got: %T", err)
 	}
 
-	switch ferr.FailureMessage.(type) {
+	switch rtErr.WireMessage().(type) {
 	case *lnwire.FailInvalidOnionVersion:
 	default:
 		t.Fatalf("wrong error have been received: %v", err)
@@ -1378,7 +1388,7 @@ func TestChannelLinkMultiHopDecodeError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to get invoice: %v", err)
 	}
-	if invoice.Terms.State == channeldb.ContractSettled {
+	if invoice.State == channeldb.ContractSettled {
 		t.Fatal("carol invoice have been settled")
 	}
 
@@ -1450,13 +1460,13 @@ func TestChannelLinkExpiryTooSoonExitNode(t *testing.T) {
 			"time lock value")
 	}
 
-	ferr, ok := err.(*ForwardingError)
+	rtErr, ok := err.(ClearTextError)
 	if !ok {
-		t.Fatalf("expected a ForwardingError, instead got: %T %v",
-			err, err)
+		t.Fatalf("expected a ClearTextError, instead got: %T %v",
+			rtErr, err)
 	}
 
-	switch ferr.FailureMessage.(type) {
+	switch rtErr.WireMessage().(type) {
 	case *lnwire.FailIncorrectDetails:
 	default:
 		t.Fatalf("expected incorrect_or_unknown_payment_details, "+
@@ -1513,12 +1523,13 @@ func TestChannelLinkExpiryTooSoonMidNode(t *testing.T) {
 			"time lock value")
 	}
 
-	ferr, ok := err.(*ForwardingError)
+	rtErr, ok := err.(ClearTextError)
 	if !ok {
-		t.Fatalf("expected a ForwardingError, instead got: %T: %v", err, err)
+		t.Fatalf("expected a ClearTextError, instead got: %T: %v",
+			rtErr, err)
 	}
 
-	switch ferr.FailureMessage.(type) {
+	switch rtErr.WireMessage().(type) {
 	case *lnwire.FailExpiryTooSoon:
 	default:
 		t.Fatalf("incorrect error, expected final time lock too "+
@@ -1688,7 +1699,7 @@ func newSingleLinkTestHarness(chanAmt, chanReserve btcutil.Amount) (
 			quit:     make(chan struct{}),
 		}
 		globalPolicy = ForwardingPolicy{
-			MinHTLC:       lnwire.NewMSatFromSatoshis(5),
+			MinHTLCOut:    lnwire.NewMSatFromSatoshis(5),
 			MaxHTLC:       lnwire.NewMSatFromSatoshis(chanAmt),
 			BaseFee:       lnwire.NewMSatFromSatoshis(1),
 			TimeLockDelta: 6,
@@ -1967,7 +1978,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 		t.Fatalf("unable to query fee estimator: %v", err)
 	}
 	htlcFee := lnwire.NewMSatFromSatoshis(
-		feePerKw.FeeForWeight(input.HtlcWeight),
+		feePerKw.FeeForWeight(input.HTLCWeight),
 	)
 
 	// The starting bandwidth of the channel should be exactly the amount
@@ -2456,7 +2467,7 @@ func TestChannelLinkBandwidthConsistencyOverflow(t *testing.T) {
 
 	// TODO(roasbeef): increase sleep
 	time.Sleep(time.Second * 1)
-	commitWeight := input.CommitWeight + input.HtlcWeight*numHTLCs
+	commitWeight := int64(input.CommitWeight + input.HTLCWeight*numHTLCs)
 	htlcFee := lnwire.NewMSatFromSatoshis(
 		feePerKw.FeeForWeight(commitWeight),
 	)
@@ -2640,7 +2651,7 @@ func TestChannelLinkTrimCircuitsPending(t *testing.T) {
 
 	defaultCommitFee := alice.channel.StateSnapshot().CommitFee
 	htlcFee := lnwire.NewMSatFromSatoshis(
-		feePerKw.FeeForWeight(input.HtlcWeight),
+		feePerKw.FeeForWeight(input.HTLCWeight),
 	)
 
 	// The starting bandwidth of the channel should be exactly the amount
@@ -2919,7 +2930,7 @@ func TestChannelLinkTrimCircuitsNoCommit(t *testing.T) {
 
 	defaultCommitFee := alice.channel.StateSnapshot().CommitFee
 	htlcFee := lnwire.NewMSatFromSatoshis(
-		feePerKw.FeeForWeight(input.HtlcWeight),
+		feePerKw.FeeForWeight(input.HTLCWeight),
 	)
 
 	// The starting bandwidth of the channel should be exactly the amount
@@ -3175,7 +3186,7 @@ func TestChannelLinkBandwidthChanReserve(t *testing.T) {
 		t.Fatalf("unable to query fee estimator: %v", err)
 	}
 	htlcFee := lnwire.NewMSatFromSatoshis(
-		feePerKw.FeeForWeight(input.HtlcWeight),
+		feePerKw.FeeForWeight(input.HTLCWeight),
 	)
 
 	// The starting bandwidth of the channel should be exactly the amount
@@ -3512,7 +3523,7 @@ func TestChannelRetransmission(t *testing.T) {
 				err = errors.Errorf("unable to get invoice: %v", err)
 				continue
 			}
-			if invoice.Terms.State != channeldb.ContractSettled {
+			if invoice.State != channeldb.ContractSettled {
 				err = errors.Errorf("alice invoice haven't been settled")
 				continue
 			}
@@ -4049,7 +4060,7 @@ func TestChannelLinkAcceptOverpay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to get invoice: %v", err)
 	}
-	if invoice.Terms.State != channeldb.ContractSettled {
+	if invoice.State != channeldb.ContractSettled {
 		t.Fatal("carol invoice haven't been settled")
 	}
 
@@ -4247,7 +4258,7 @@ func (h *persistentLinkHarness) restartLink(
 		}
 
 		globalPolicy = ForwardingPolicy{
-			MinHTLC:       lnwire.NewMSatFromSatoshis(5),
+			MinHTLCOut:    lnwire.NewMSatFromSatoshis(5),
 			BaseFee:       lnwire.NewMSatFromSatoshis(1),
 			TimeLockDelta: 6,
 		}
@@ -5506,7 +5517,7 @@ func TestCheckHtlcForward(t *testing.T) {
 		cfg: ChannelLinkConfig{
 			FwrdingPolicy: ForwardingPolicy{
 				TimeLockDelta: 20,
-				MinHTLC:       500,
+				MinHTLCOut:    500,
 				MaxHTLC:       1000,
 				BaseFee:       10,
 			},
@@ -5531,7 +5542,7 @@ func TestCheckHtlcForward(t *testing.T) {
 	t.Run("below minhtlc", func(t *testing.T) {
 		result := link.CheckHtlcForward(hash, 100, 50,
 			200, 150, 0)
-		if _, ok := result.(*lnwire.FailAmountBelowMinimum); !ok {
+		if _, ok := result.WireMessage().(*lnwire.FailAmountBelowMinimum); !ok {
 			t.Fatalf("expected FailAmountBelowMinimum failure code")
 		}
 	})
@@ -5539,7 +5550,7 @@ func TestCheckHtlcForward(t *testing.T) {
 	t.Run("above maxhtlc", func(t *testing.T) {
 		result := link.CheckHtlcForward(hash, 1500, 1200,
 			200, 150, 0)
-		if _, ok := result.(*lnwire.FailTemporaryChannelFailure); !ok {
+		if _, ok := result.WireMessage().(*lnwire.FailTemporaryChannelFailure); !ok {
 			t.Fatalf("expected FailTemporaryChannelFailure failure code")
 		}
 	})
@@ -5547,7 +5558,7 @@ func TestCheckHtlcForward(t *testing.T) {
 	t.Run("insufficient fee", func(t *testing.T) {
 		result := link.CheckHtlcForward(hash, 1005, 1000,
 			200, 150, 0)
-		if _, ok := result.(*lnwire.FailFeeInsufficient); !ok {
+		if _, ok := result.WireMessage().(*lnwire.FailFeeInsufficient); !ok {
 			t.Fatalf("expected FailFeeInsufficient failure code")
 		}
 	})
@@ -5555,7 +5566,7 @@ func TestCheckHtlcForward(t *testing.T) {
 	t.Run("expiry too soon", func(t *testing.T) {
 		result := link.CheckHtlcForward(hash, 1500, 1000,
 			200, 150, 190)
-		if _, ok := result.(*lnwire.FailExpiryTooSoon); !ok {
+		if _, ok := result.WireMessage().(*lnwire.FailExpiryTooSoon); !ok {
 			t.Fatalf("expected FailExpiryTooSoon failure code")
 		}
 	})
@@ -5563,7 +5574,7 @@ func TestCheckHtlcForward(t *testing.T) {
 	t.Run("incorrect cltv expiry", func(t *testing.T) {
 		result := link.CheckHtlcForward(hash, 1500, 1000,
 			200, 190, 0)
-		if _, ok := result.(*lnwire.FailIncorrectCltvExpiry); !ok {
+		if _, ok := result.WireMessage().(*lnwire.FailIncorrectCltvExpiry); !ok {
 			t.Fatalf("expected FailIncorrectCltvExpiry failure code")
 		}
 
@@ -5573,7 +5584,7 @@ func TestCheckHtlcForward(t *testing.T) {
 		// Check that expiry isn't too far in the future.
 		result := link.CheckHtlcForward(hash, 1500, 1000,
 			10200, 10100, 0)
-		if _, ok := result.(*lnwire.FailExpiryTooFar); !ok {
+		if _, ok := result.WireMessage().(*lnwire.FailExpiryTooFar); !ok {
 			t.Fatalf("expected FailExpiryTooFar failure code")
 		}
 	})
@@ -5626,11 +5637,11 @@ func TestChannelLinkCanceledInvoice(t *testing.T) {
 
 	// Because the invoice is canceled, we expect an unknown payment hash
 	// result.
-	fErr, ok := err.(*ForwardingError)
+	rtErr, ok := err.(ClearTextError)
 	if !ok {
-		t.Fatalf("expected ForwardingError, but got %v", err)
+		t.Fatalf("expected ClearTextError, but got %v", err)
 	}
-	_, ok = fErr.FailureMessage.(*lnwire.FailIncorrectDetails)
+	_, ok = rtErr.WireMessage().(*lnwire.FailIncorrectDetails)
 	if !ok {
 		t.Fatalf("expected unknown payment hash, but got %v", err)
 	}
@@ -6207,16 +6218,16 @@ func TestChannelLinkReceiveEmptySig(t *testing.T) {
 	aliceLink.Stop()
 }
 
-// assertFailureCode asserts that an error is of type ForwardingError and that
+// assertFailureCode asserts that an error is of type ClearTextError and that
 // the failure code is as expected.
 func assertFailureCode(t *testing.T, err error, code lnwire.FailCode) {
-	fErr, ok := err.(*ForwardingError)
+	rtErr, ok := err.(ClearTextError)
 	if !ok {
-		t.Fatalf("expected ForwardingError but got %T", err)
+		t.Fatalf("expected ClearTextError but got %T", err)
 	}
 
-	if fErr.FailureMessage.Code() != code {
+	if rtErr.WireMessage().Code() != code {
 		t.Fatalf("expected %v but got %v",
-			code, fErr.FailureMessage.Code())
+			code, rtErr.WireMessage().Code())
 	}
 }

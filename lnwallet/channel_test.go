@@ -19,6 +19,7 @@ import (
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/input"
+	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
 )
@@ -600,7 +601,7 @@ func TestForceClose(t *testing.T) {
 
 	// Factoring in the fee rate, Alice's amount should properly reflect
 	// that we've added two additional HTLC to the commitment transaction.
-	totalCommitWeight := input.CommitWeight + (input.HtlcWeight * 2)
+	totalCommitWeight := int64(input.CommitWeight + (input.HTLCWeight * 2))
 	feePerKw := chainfee.SatPerKWeight(
 		aliceChannel.channelState.LocalCommitment.FeePerKw,
 	)
@@ -615,7 +616,7 @@ func TestForceClose(t *testing.T) {
 	// Alice's listed CSV delay should also match the delay that was
 	// pre-committed to at channel opening.
 	if aliceCommitResolution.MaturityDelay !=
-		uint32(aliceChannel.localChanCfg.CsvDelay) {
+		uint32(aliceChannel.channelState.LocalChanCfg.CsvDelay) {
 
 		t.Fatalf("alice: incorrect local CSV delay in ForceCloseSummary, "+
 			"expected %v, got %v",
@@ -816,10 +817,10 @@ func TestForceCloseDustOutput(t *testing.T) {
 	// We set both node's channel reserves to 0, to make sure
 	// they can create small dust ouputs without going under
 	// their channel reserves.
-	aliceChannel.localChanCfg.ChanReserve = 0
-	bobChannel.localChanCfg.ChanReserve = 0
-	aliceChannel.remoteChanCfg.ChanReserve = 0
-	bobChannel.remoteChanCfg.ChanReserve = 0
+	aliceChannel.channelState.LocalChanCfg.ChanReserve = 0
+	bobChannel.channelState.LocalChanCfg.ChanReserve = 0
+	aliceChannel.channelState.RemoteChanCfg.ChanReserve = 0
+	bobChannel.channelState.RemoteChanCfg.ChanReserve = 0
 
 	htlcAmount := lnwire.NewMSatFromSatoshis(500)
 
@@ -1268,8 +1269,8 @@ func TestChannelBalanceDustLimit(t *testing.T) {
 
 	// To allow Alice's balance to get beneath her dust limit, set the
 	// channel reserve to be 0.
-	aliceChannel.localChanCfg.ChanReserve = 0
-	bobChannel.remoteChanCfg.ChanReserve = 0
+	aliceChannel.channelState.LocalChanCfg.ChanReserve = 0
+	bobChannel.channelState.RemoteChanCfg.ChanReserve = 0
 
 	// This amount should leave an amount larger than Alice's dust limit
 	// once fees have been subtracted, but smaller than Bob's dust limit.
@@ -2553,7 +2554,7 @@ func TestAddHTLCNegativeBalance(t *testing.T) {
 
 	// We set the channel reserve to 0, such that we can add HTLCs all the
 	// way to a negative balance.
-	aliceChannel.localChanCfg.ChanReserve = 0
+	aliceChannel.channelState.LocalChanCfg.ChanReserve = 0
 
 	// First, we'll add 3 HTLCs of 1 BTC each to Alice's commitment.
 	const numHTLCs = 3
@@ -3047,6 +3048,112 @@ func TestChanSyncOweCommitment(t *testing.T) {
 	if bobChannel.channelState.TotalMSatReceived != htlcAmt {
 		t.Fatalf("wrong value for msat recv: expected %v, got %v",
 			htlcAmt, bobChannel.channelState.TotalMSatReceived)
+	}
+}
+
+// TestChanSyncOweCommitmentPendingRemote asserts that local updates are applied
+// to the remote commit across restarts.
+func TestChanSyncOweCommitmentPendingRemote(t *testing.T) {
+	t.Parallel()
+
+	// Create a test channel which will be used for the duration of this
+	// unittest.
+	aliceChannel, bobChannel, cleanUp, err := CreateTestChannels(true)
+	if err != nil {
+		t.Fatalf("unable to create test channels: %v", err)
+	}
+	defer cleanUp()
+
+	var fakeOnionBlob [lnwire.OnionPacketSize]byte
+	copy(fakeOnionBlob[:], bytes.Repeat([]byte{0x05}, lnwire.OnionPacketSize))
+
+	// We'll start off the scenario where Bob send two htlcs to Alice in a
+	// single state update.
+	var preimages []lntypes.Preimage
+	const numHtlcs = 2
+	for id := byte(0); id < numHtlcs; id++ {
+		htlcAmt := lnwire.NewMSatFromSatoshis(20000)
+		var bobPreimage [32]byte
+		copy(bobPreimage[:], bytes.Repeat([]byte{id}, 32))
+		rHash := sha256.Sum256(bobPreimage[:])
+		h := &lnwire.UpdateAddHTLC{
+			PaymentHash: rHash,
+			Amount:      htlcAmt,
+			Expiry:      uint32(10),
+			OnionBlob:   fakeOnionBlob,
+		}
+
+		htlcIndex, err := bobChannel.AddHTLC(h, nil)
+		if err != nil {
+			t.Fatalf("unable to add bob's htlc: %v", err)
+		}
+
+		h.ID = htlcIndex
+		if _, err := aliceChannel.ReceiveHTLC(h); err != nil {
+			t.Fatalf("unable to recv bob's htlc: %v", err)
+		}
+
+		preimages = append(preimages, bobPreimage)
+	}
+
+	// With the HTLCs applied to both update logs, we'll initiate a state
+	// transition from Bob.
+	if err := ForceStateTransition(bobChannel, aliceChannel); err != nil {
+		t.Fatalf("unable to complete bob's state transition: %v", err)
+	}
+
+	// Next, Alice settles the HTLCs from Bob in distinct state updates.
+	for i := 0; i < numHtlcs; i++ {
+		err = aliceChannel.SettleHTLC(preimages[i], uint64(i), nil, nil, nil)
+		if err != nil {
+			t.Fatalf("unable to settle htlc: %v", err)
+		}
+		err = bobChannel.ReceiveHTLCSettle(preimages[i], uint64(i))
+		if err != nil {
+			t.Fatalf("unable to settle htlc: %v", err)
+		}
+
+		aliceSig, aliceHtlcSigs, _, err := aliceChannel.SignNextCommitment()
+		if err != nil {
+			t.Fatalf("unable to sign commitment: %v", err)
+		}
+
+		err = bobChannel.ReceiveNewCommitment(aliceSig, aliceHtlcSigs)
+		if err != nil {
+			t.Fatalf("unable to receive commitment: %v", err)
+		}
+
+		// Bob revokes his current commitment. After this call
+		// completes, the htlc is settled on the local commitment
+		// transaction. Bob still owes Alice a signature to also settle
+		// the htlc on her local commitment transaction.
+		bobRevoke, _, err := bobChannel.RevokeCurrentCommitment()
+		if err != nil {
+			t.Fatalf("unable to revoke commitment: %v", err)
+		}
+
+		_, _, _, _, err = aliceChannel.ReceiveRevocation(bobRevoke)
+		if err != nil {
+			t.Fatalf("unable to revoke commitment: %v", err)
+		}
+	}
+
+	// We restart Bob. This should have no impact on further message that
+	// are generated.
+	bobChannel, err = restartChannel(bobChannel)
+	if err != nil {
+		t.Fatalf("unable to restart bob: %v", err)
+	}
+
+	// Bob signs the commitment he owes.
+	_, bobHtlcSigs, _, err := bobChannel.SignNextCommitment()
+	if err != nil {
+		t.Fatalf("unable to sign commitment: %v", err)
+	}
+
+	// This commitment is expected to contain no htlcs anymore.
+	if len(bobHtlcSigs) != 0 {
+		t.Fatalf("no htlcs expected, but got %v", len(bobHtlcSigs))
 	}
 }
 
@@ -5346,14 +5453,14 @@ func TestMaxAcceptedHTLCs(t *testing.T) {
 
 	// Set the remote's required MaxAcceptedHtlcs. This means that alice
 	// can only offer the remote up to numHTLCs HTLCs.
-	aliceChannel.localChanCfg.MaxAcceptedHtlcs = numHTLCs
-	bobChannel.remoteChanCfg.MaxAcceptedHtlcs = numHTLCs
+	aliceChannel.channelState.LocalChanCfg.MaxAcceptedHtlcs = numHTLCs
+	bobChannel.channelState.RemoteChanCfg.MaxAcceptedHtlcs = numHTLCs
 
 	// Similarly, set the remote config's MaxAcceptedHtlcs. This means
 	// that the remote will be aware that Alice will only accept up to
 	// numHTLCsRecevied at a time.
-	aliceChannel.remoteChanCfg.MaxAcceptedHtlcs = numHTLCsReceived
-	bobChannel.localChanCfg.MaxAcceptedHtlcs = numHTLCsReceived
+	aliceChannel.channelState.RemoteChanCfg.MaxAcceptedHtlcs = numHTLCsReceived
+	bobChannel.channelState.LocalChanCfg.MaxAcceptedHtlcs = numHTLCsReceived
 
 	// Each HTLC amount is 0.1 BTC.
 	htlcAmt := lnwire.NewMSatFromSatoshis(0.1 * btcutil.SatoshiPerBitcoin)
@@ -5409,8 +5516,8 @@ func TestMaxPendingAmount(t *testing.T) {
 	// We set the max pending amount of Alice's config. This mean that she
 	// cannot offer Bob HTLCs with a total value above this limit at a given
 	// time.
-	aliceChannel.localChanCfg.MaxPendingAmount = maxPending
-	bobChannel.remoteChanCfg.MaxPendingAmount = maxPending
+	aliceChannel.channelState.LocalChanCfg.MaxPendingAmount = maxPending
+	bobChannel.channelState.RemoteChanCfg.MaxPendingAmount = maxPending
 
 	// First, we'll add 2 HTLCs of 1.5 BTC each to Alice's commitment.
 	// This won't trigger Alice's ErrMaxPendingAmount error.
@@ -5498,20 +5605,20 @@ func TestChanReserve(t *testing.T) {
 
 		// Alice will need to keep her reserve above aliceMinReserve,
 		// so set this limit to here local config.
-		aliceChannel.localChanCfg.ChanReserve = aliceMinReserve
+		aliceChannel.channelState.LocalChanCfg.ChanReserve = aliceMinReserve
 
 		// During channel opening Bob will also get to know Alice's
 		// minimum reserve, and this will be found in his remote
 		// config.
-		bobChannel.remoteChanCfg.ChanReserve = aliceMinReserve
+		bobChannel.channelState.RemoteChanCfg.ChanReserve = aliceMinReserve
 
 		// We set Bob's channel reserve to a value that is larger than
 		// his current balance in the channel. This will ensure that
 		// after a channel is first opened, Bob can still receive HTLCs
 		// even though his balance is less than his channel reserve.
 		bobMinReserve := btcutil.Amount(6 * btcutil.SatoshiPerBitcoin)
-		bobChannel.localChanCfg.ChanReserve = bobMinReserve
-		aliceChannel.remoteChanCfg.ChanReserve = bobMinReserve
+		bobChannel.channelState.LocalChanCfg.ChanReserve = bobMinReserve
+		aliceChannel.channelState.RemoteChanCfg.ChanReserve = bobMinReserve
 
 		return aliceChannel, bobChannel, cleanUp
 	}
@@ -5713,8 +5820,8 @@ func TestMinHTLC(t *testing.T) {
 
 	// Setting the min value in Alice's local config means that the
 	// remote will not accept any HTLCs of value less than specified.
-	aliceChannel.localChanCfg.MinHTLC = minValue
-	bobChannel.remoteChanCfg.MinHTLC = minValue
+	aliceChannel.channelState.LocalChanCfg.MinHTLC = minValue
+	bobChannel.channelState.RemoteChanCfg.MinHTLC = minValue
 
 	// First, we will add an HTLC of 0.5 BTC. This will not trigger
 	// ErrBelowMinHTLC.
@@ -6178,9 +6285,11 @@ func TestChannelRestoreUpdateLogsFailedHTLC(t *testing.T) {
 	// At this point Alice has advanced her local commitment chain to a
 	// commitment with no HTLCs left. The current state on her remote
 	// commitment chain, however, still has the HTLC active, as she hasn't
-	// sent a new signature yet.
+	// sent a new signature yet. If we'd now restart and restore, the htlc
+	// failure update should still be waiting for inclusion in Alice's next
+	// signature. Otherwise the produced signature would be invalid.
 	assertInLogs(t, aliceChannel, 1, 0, 0, 1)
-	restoreAndAssert(t, aliceChannel, 1, 0, 0, 0)
+	restoreAndAssert(t, aliceChannel, 1, 0, 0, 1)
 
 	// Now send a signature from Alice. This will give Bob a new commitment
 	// where the HTLC is removed.

@@ -27,7 +27,7 @@ type InvoiceDatabase interface {
 	NotifyExitHopHtlc(payHash lntypes.Hash, paidAmount lnwire.MilliSatoshi,
 		expiry uint32, currentHeight int32,
 		circuitKey channeldb.CircuitKey, hodlChan chan<- interface{},
-		payload invoices.Payload) (*invoices.HodlEvent, error)
+		payload invoices.Payload) (*invoices.HtlcResolution, error)
 
 	// CancelInvoice attempts to cancel the invoice corresponding to the
 	// passed payment hash.
@@ -36,7 +36,7 @@ type InvoiceDatabase interface {
 	// SettleHodlInvoice settles a hold invoice.
 	SettleHodlInvoice(preimage lntypes.Preimage) error
 
-	// HodlUnsubscribeAll unsubscribes from all hodl events.
+	// HodlUnsubscribeAll unsubscribes from all htlc resolutions.
 	HodlUnsubscribeAll(subscriber chan<- interface{})
 }
 
@@ -102,20 +102,21 @@ type ChannelLink interface {
 
 	// CheckHtlcForward should return a nil error if the passed HTLC details
 	// satisfy the current forwarding policy fo the target link. Otherwise,
-	// a valid protocol failure message should be returned in order to
-	// signal to the source of the HTLC, the policy consistency issue.
+	// a LinkError with a valid protocol failure message should be returned
+	// in order to signal to the source of the HTLC, the policy consistency
+	// issue.
 	CheckHtlcForward(payHash [32]byte, incomingAmt lnwire.MilliSatoshi,
 		amtToForward lnwire.MilliSatoshi,
 		incomingTimeout, outgoingTimeout uint32,
-		heightNow uint32) lnwire.FailureMessage
+		heightNow uint32) *LinkError
 
 	// CheckHtlcTransit should return a nil error if the passed HTLC details
-	// satisfy the current channel policy.  Otherwise, a valid protocol
-	// failure message should be returned in order to signal the violation.
-	// This call is intended to be used for locally initiated payments for
-	// which there is no corresponding incoming htlc.
+	// satisfy the current channel policy.  Otherwise, a LinkError with a
+	// valid protocol failure message should be returned in order to signal
+	// the violation. This call is intended to be used for locally initiated
+	// payments for which there is no corresponding incoming htlc.
 	CheckHtlcTransit(payHash [32]byte, amt lnwire.MilliSatoshi,
-		timeout uint32, heightNow uint32) lnwire.FailureMessage
+		timeout uint32, heightNow uint32) *LinkError
 
 	// Bandwidth returns the amount of milli-satoshis which current link
 	// might pass through channel link. The value returned from this method

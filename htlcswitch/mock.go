@@ -22,6 +22,7 @@ import (
 	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/clock"
 	"github.com/lightningnetwork/lnd/contractcourt"
 	"github.com/lightningnetwork/lnd/htlcswitch/hop"
 	"github.com/lightningnetwork/lnd/input"
@@ -399,10 +400,7 @@ func (o *mockDeobfuscator) DecryptError(reason lnwire.OpaqueReason) (*Forwarding
 		return nil, err
 	}
 
-	return &ForwardingError{
-		FailureSourceIdx: 1,
-		FailureMessage:   failure,
-	}, nil
+	return NewForwardingError(failure, 1), nil
 }
 
 var _ ErrorDecrypter = (*mockDeobfuscator)(nil)
@@ -647,9 +645,9 @@ type mockChannelLink struct {
 
 	htlcID uint64
 
-	checkHtlcTransitResult lnwire.FailureMessage
+	checkHtlcTransitResult *LinkError
 
-	checkHtlcForwardResult lnwire.FailureMessage
+	checkHtlcForwardResult *LinkError
 }
 
 // completeCircuit is a helper method for adding the finalized payment circuit
@@ -709,14 +707,14 @@ func (f *mockChannelLink) HandleChannelUpdate(lnwire.Message) {
 func (f *mockChannelLink) UpdateForwardingPolicy(_ ForwardingPolicy) {
 }
 func (f *mockChannelLink) CheckHtlcForward([32]byte, lnwire.MilliSatoshi,
-	lnwire.MilliSatoshi, uint32, uint32, uint32) lnwire.FailureMessage {
+	lnwire.MilliSatoshi, uint32, uint32, uint32) *LinkError {
 
 	return f.checkHtlcForwardResult
 }
 
 func (f *mockChannelLink) CheckHtlcTransit(payHash [32]byte,
 	amt lnwire.MilliSatoshi, timeout uint32,
-	heightNow uint32) lnwire.FailureMessage {
+	heightNow uint32) *LinkError {
 
 	return f.checkHtlcTransitResult
 }
@@ -790,9 +788,13 @@ func newMockRegistry(minDelta uint32) *mockInvoiceRegistry {
 		panic(err)
 	}
 
-	finalCltvRejectDelta := int32(5)
-
-	registry := invoices.NewRegistry(cdb, finalCltvRejectDelta)
+	registry := invoices.NewRegistry(
+		cdb,
+		invoices.NewInvoiceExpiryWatcher(clock.NewDefaultClock()),
+		&invoices.RegistryConfig{
+			FinalCltvRejectDelta: 5,
+		},
+	)
 	registry.Start()
 
 	return &mockInvoiceRegistry{
@@ -814,7 +816,7 @@ func (i *mockInvoiceRegistry) SettleHodlInvoice(preimage lntypes.Preimage) error
 func (i *mockInvoiceRegistry) NotifyExitHopHtlc(rhash lntypes.Hash,
 	amt lnwire.MilliSatoshi, expiry uint32, currentHeight int32,
 	circuitKey channeldb.CircuitKey, hodlChan chan<- interface{},
-	payload invoices.Payload) (*invoices.HodlEvent, error) {
+	payload invoices.Payload) (*invoices.HtlcResolution, error) {
 
 	event, err := i.registry.NotifyExitHopHtlc(
 		rhash, amt, expiry, currentHeight, circuitKey, hodlChan,

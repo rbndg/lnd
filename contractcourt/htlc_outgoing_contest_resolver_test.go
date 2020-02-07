@@ -6,6 +6,7 @@ import (
 
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/chainntnfs"
+	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet"
@@ -98,6 +99,8 @@ func newOutgoingResolverTestContext(t *testing.T) *outgoingResolverTestContext {
 
 	preimageDB := newMockWitnessBeacon()
 
+	onionProcessor := &mockOnionProcessor{}
+
 	chainCfg := ChannelArbitratorConfig{
 		ChainArbitratorConfig: ChainArbitratorConfig{
 			Notifier:   notifier,
@@ -112,6 +115,7 @@ func newOutgoingResolverTestContext(t *testing.T) *outgoingResolverTestContext {
 				resolutionChan <- msgs[0]
 				return nil
 			},
+			OnionProcessor: onionProcessor,
 		},
 	}
 
@@ -122,16 +126,22 @@ func newOutgoingResolverTestContext(t *testing.T) *outgoingResolverTestContext {
 		},
 	}
 
+	cfg := ResolverConfig{
+		ChannelArbitratorConfig: chainCfg,
+		Checkpoint: func(_ ContractResolver) error {
+			checkPointChan <- struct{}{}
+			return nil
+		},
+	}
+
 	resolver := &htlcOutgoingContestResolver{
 		htlcTimeoutResolver: htlcTimeoutResolver{
-			ResolverKit: ResolverKit{
-				ChannelArbitratorConfig: chainCfg,
-				Checkpoint: func(_ ContractResolver) error {
-					checkPointChan <- struct{}{}
-					return nil
-				},
+			contractResolverKit: *newContractResolverKit(cfg),
+			htlcResolution:      outgoingRes,
+			htlc: channeldb.HTLC{
+				RHash:     testResHash,
+				OnionBlob: testOnionBlob,
 			},
-			htlcResolution: outgoingRes,
 		},
 	}
 
